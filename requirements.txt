@@ -1,0 +1,18 @@
+# FastAPI and uvicorn for the web server
+fastapi
+uvicorn[standard]
+
+# For handling file uploads (multipart forms)
+python-multipart
+
+# For document ingestion
+PyPDF2
+python-docx
+beautifulsoup4
+requests
+
+# For LLM and RAG pipeline
+google-generativeai # For Gemini API
+faiss-cpu # For vector storage
+sentence-transformers # For creating embeddings
+langchain # A framework for building LLM applications
