@@ -1,0 +1,22 @@
+# Python bytecode
+__pycache__/
+
+# Virtual environment files
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+.env.*
+
+# Data storage files
+/data/
+
+# OS and IDE files
+.DS_Store
+.vscode/
+.idea/
+
+# FAISS index files
+faiss_index/
