@@ -4,16 +4,12 @@ import google.generativeai as genai
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # Configure the Gemini API key from environment variables
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 router = APIRouter()
 model = genai.GenerativeModel('gemini-1.5-flash')
-
-# Initialize the embedding model (must be the same as ingestion)
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 # Pydantic model for the news request body
 class NewsRequest(BaseModel):
@@ -27,20 +23,32 @@ async def get_news_summary(request: NewsRequest):
     """
     try:
         # Load the FAISS index
-        faiss_index = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+        # We use `allow_dangerous_deserialization=True` because the index
+        # was not created with a LangChain-compatible embedding function.
+        faiss_index = FAISS.load_local("faiss_index", embeddings=None, allow_dangerous_deserialization=True)
+        
+        # Embed the user's query using the Gemini API
+        query_embedding_response = genai.embed_content(
+            model="models/embedding-001",
+            content=request.query,
+            task_type="retrieval_query"
+        )
+        query_embedding = query_embedding_response['embedding']
         
         # Perform a semantic search on the index
-        retrieved_docs = faiss_index.similarity_search(request.query, k=request.num_results)
+        # We pass the raw query embedding to the FAISS search function
+        retrieved_docs_and_scores = faiss_index.similarity_search_with_score_by_vector(query_embedding, k=request.num_results)
         
-        if not retrieved_docs:
+        if not retrieved_docs_and_scores:
             return {"status": "info", "message": "No relevant documents found in the database."}
             
         # Combine the retrieved document content into a single context string
-        context = "\n\n".join([doc.page_content for doc in retrieved_docs])
+        context = "\n\n".join([doc.page_content for doc, score in retrieved_docs_and_scores])
         
         # Create a prompt for the Gemini model
         prompt = f"""
-        Based on the following context, summarize the news in a concise and neutral tone.
+        Given the following context from various news sources, summarize the information concisely and neutrally.
+        Do not add any information that is not present in the context.
         
         Context:
         {context}
@@ -55,7 +63,8 @@ async def get_news_summary(request: NewsRequest):
             "status": "success",
             "query": request.query,
             "summary": response.text.strip(),
-            "source_documents": [doc.metadata for doc in retrieved_docs] # Optional: return source info
+            # Optional: Return a list of the content of the top documents
+            "source_documents_preview": [doc.page_content for doc, score in retrieved_docs_and_scores]
         }
         
     except FileNotFoundError:
