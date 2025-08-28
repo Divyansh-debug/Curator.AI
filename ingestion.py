@@ -1,32 +1,27 @@
 import os
 import requests
+import logging
+import google.generativeai as genai
 from bs4 import BeautifulSoup
 from fastapi import APIRouter, File, UploadFile, HTTPException
 from PyPDF2 import PdfReader
 from docx import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
-import logging
+from langchain.docstore.document import Document as LangchainDocument
+
+# Configure the Gemini API key from environment variables
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 
 router = APIRouter()
 
-# Initialize the embedding model
-# You can use a local model for cost-effectiveness
-# The "all-MiniLM-L6-v2" model is a good general-purpose choice.
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-
 # Define a function to process documents and create a FAISS index
 def process_and_index_documents(texts: list[str], index_name: str = "faiss_index"):
     """
-    Processes a list of text documents, creates embeddings, and stores them in a FAISS index.
-    
-    Args:
-        texts (list[str]): A list of text strings to be processed.
-        index_name (str): The name for the FAISS index file.
+    Processes a list of text documents, creates embeddings using Gemini, and stores them in a FAISS index.
     """
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
@@ -40,7 +35,23 @@ def process_and_index_documents(texts: list[str], index_name: str = "faiss_index
         return
 
     logging.info(f"Creating a FAISS index with {len(docs)} documents.")
-    db = FAISS.from_documents(docs, embeddings)
+    
+    # Generate embeddings using Gemini API
+    texts_to_embed = [doc.page_content for doc in docs]
+    embeddings_response = genai.embed_content(
+        model="models/embedding-001",
+        content=texts_to_embed,
+        task_type="retrieval_document"
+    )
+    
+    # Create the FAISS index with the embeddings and document content
+    embeddings_list = embeddings_response['embedding']
+    db = FAISS.from_embeddings(
+        text_embeddings=list(zip(texts_to_embed, embeddings_list)),
+        embedding=None, # Not needed as we already have embeddings
+        metadatas=[doc.metadata for doc in docs]
+    )
+    
     db.save_local(index_name)
     logging.info(f"FAISS index saved to '{index_name}'.")
 
@@ -95,22 +106,39 @@ async def scrape_website(url: str):
     
     try:
         response = requests.get(url)
-        response.raise_for_status() # Raise an exception for bad status codes
+        response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
         
-        # Extract all text from the main body of the page
-        # This is a simple approach, can be improved for specific websites
         body_text = soup.body.get_text(separator="\n", strip=True)
         
-        # Load the existing index if it exists, otherwise create a new one
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        docs = text_splitter.create_documents([body_text])
+        texts_to_embed = [doc.page_content for doc in docs]
+        
+        embeddings_response = genai.embed_content(
+            model="models/embedding-001",
+            content=texts_to_embed,
+            task_type="retrieval_document"
+        )
+        embeddings_list = embeddings_response['embedding']
+        
+        # Load the existing index or create a new one
         if os.path.exists("faiss_index"):
             logging.info("Loading existing FAISS index...")
-            db = FAISS.load_local("faiss_index", embeddings)
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            docs = text_splitter.create_documents([body_text])
-            db.add_documents(docs)
-            db.save_local("faiss_index")
-            logging.info("FAISS index updated.")
+            
+            # Since LangChain's FAISS class has a custom deserialization that needs the embedding function,
+            # it's simpler to directly interact with the faiss library for updates.
+            # For this simple example, let's just re-create the index. For a production app,
+            # you'd implement logic to add to the existing index.
+            
+            # Simple approach: append new docs and rebuild index
+            old_db = FAISS.load_local("faiss_index", embeddings=None, allow_dangerous_deserialization=True)
+            old_docs = [LangchainDocument(page_content=text) for text in old_db.docstore._dict.values()]
+            
+            new_docs_texts = [doc.page_content for doc in docs]
+            all_docs_texts = [d.page_content for d in old_docs] + new_docs_texts
+            
+            process_and_index_documents(all_docs_texts)
         else:
             logging.info("No existing FAISS index found. Creating a new one.")
             process_and_index_documents([body_text])
@@ -120,3 +148,6 @@ async def scrape_website(url: str):
     except requests.exceptions.RequestException as e:
         logging.error(f"Error scraping URL {url}: {e}")
         raise HTTPException(status_code=500, detail=f"Error scraping URL: {e}")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected server error occurred.")
