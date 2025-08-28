@@ -9,3 +9,4 @@ google-generativeai
 faiss-cpu
 pydantic
 pydantic-settings
+langchain-community
